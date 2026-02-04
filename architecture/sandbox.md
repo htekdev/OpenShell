@@ -68,8 +68,59 @@ Linux enforcement lives in `crates/navigator-sandbox/src/sandbox/linux`.
 
 ## Proxy Routing
 
-When `network.mode: proxy` is set, `NAVIGATOR_PROXY_SOCKET` is exported to the child. Seccomp still
-blocks direct socket creation so traffic must flow through the proxy channel.
+When `network.mode: proxy` is set, network traffic is forced through an HTTP CONNECT proxy that
+enforces the `allow_hosts` allowlist. The proxy implementation lives in
+`crates/navigator-sandbox/src/proxy.rs`.
+
+### Network Namespace Isolation (Linux)
+
+Seccomp alone cannot fully enforce proxy-only networking because it cannot filter `connect()` calls
+by destination address (the sockaddr struct is a userspace pointer that seccomp cannot dereference).
+A process that ignores `HTTP_PROXY` environment variables could connect directly to any IP.
+
+To close this gap, proxy mode uses Linux network namespaces to isolate the sandboxed process:
+
+```
+HOST NAMESPACE                          SANDBOX NAMESPACE
+──────────────                          ─────────────────
+veth-host                               veth-sandbox
+10.200.0.1/24  ◄─────────────────────►  10.200.0.2/24
+     │                                       │
+     ▼                                       ▼
+Proxy (10.200.0.1:3128)                Sandboxed process
+     │                                  (can ONLY reach 10.200.0.1)
+     ▼
+Internet (via allow_hosts)
+```
+
+**Setup sequence:**
+
+1. Create a new network namespace (`ip netns add sandbox-{id}`)
+2. Create a veth pair connecting host and sandbox namespaces
+3. Assign IPs: host side gets `10.200.0.1/24`, sandbox side gets `10.200.0.2/24`
+4. Configure default route in sandbox to go via `10.200.0.1`
+5. Proxy binds to `10.200.0.1:3128` instead of localhost
+6. Child process enters the namespace via `setns()` before `exec`
+
+The implementation lives in `crates/navigator-sandbox/src/sandbox/linux/netns.rs`.
+
+**Requirements:**
+
+- `CAP_SYS_ADMIN`: Required for creating namespaces and mount operations
+- `CAP_NET_ADMIN`: Required for creating veth pairs and configuring interfaces
+- `iproute2` package: Provides the `ip` command for namespace/interface setup
+
+If namespace creation fails (e.g., missing capabilities), the sandbox logs a warning and continues
+without network isolation. This allows development/testing without elevated privileges, though
+production deployments should ensure capabilities are granted.
+
+### Proxy Environment Variables
+
+The sandbox exports proxy configuration to the child process:
+
+- `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`: Set to `http://10.200.0.1:3128` (with netns) or
+  `http://127.0.0.1:3128` (without netns)
+- `NAVIGATOR_PROXY_SOCKET`: Path to Unix socket if configured
 
 ## Process Privileges
 

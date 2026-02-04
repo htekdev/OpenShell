@@ -2,10 +2,14 @@
 
 use crate::policy::{NetworkMode, SandboxPolicy};
 use crate::sandbox;
+#[cfg(target_os = "linux")]
+use crate::sandbox::linux::netns::NetworkNamespace;
 use miette::{IntoDiagnostic, Result};
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Group, Pid, User};
 use std::ffi::CString;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::RawFd;
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tracing::{debug, warn};
@@ -22,7 +26,132 @@ impl ProcessHandle {
     /// # Errors
     ///
     /// Returns an error if the process fails to start.
+    #[cfg(target_os = "linux")]
     pub fn spawn(
+        program: &str,
+        args: &[String],
+        workdir: Option<&str>,
+        interactive: bool,
+        policy: &SandboxPolicy,
+        netns: Option<&NetworkNamespace>,
+    ) -> Result<Self> {
+        Self::spawn_impl(
+            program,
+            args,
+            workdir,
+            interactive,
+            policy,
+            netns.and_then(|ns| ns.ns_fd()),
+        )
+    }
+
+    /// Spawn a new process (non-Linux platforms).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process fails to start.
+    #[cfg(not(target_os = "linux"))]
+    pub fn spawn(
+        program: &str,
+        args: &[String],
+        workdir: Option<&str>,
+        interactive: bool,
+        policy: &SandboxPolicy,
+    ) -> Result<Self> {
+        Self::spawn_impl(program, args, workdir, interactive, policy)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_impl(
+        program: &str,
+        args: &[String],
+        workdir: Option<&str>,
+        interactive: bool,
+        policy: &SandboxPolicy,
+        netns_fd: Option<RawFd>,
+    ) -> Result<Self> {
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true)
+            .env("NAVIGATOR_SANDBOX", "1");
+
+        if let Some(dir) = workdir {
+            cmd.current_dir(dir);
+        }
+
+        if matches!(policy.network.mode, NetworkMode::Proxy) {
+            let proxy = policy.network.proxy.as_ref().ok_or_else(|| {
+                miette::miette!(
+                    "Network mode is set to proxy but no proxy configuration was provided"
+                )
+            })?;
+            if let Some(unix_socket) = &proxy.unix_socket {
+                cmd.env("NAVIGATOR_PROXY_SOCKET", unix_socket);
+            }
+            // When using network namespace, set proxy URL to the veth host IP
+            if netns_fd.is_some() {
+                // The proxy is on 10.200.0.1:3128 (or configured port)
+                let port = proxy.http_addr.map_or(3128, |addr| addr.port());
+                let proxy_url = format!("http://10.200.0.1:{port}");
+                cmd.env("ALL_PROXY", &proxy_url)
+                    .env("HTTP_PROXY", &proxy_url)
+                    .env("HTTPS_PROXY", &proxy_url);
+            } else if let Some(http_addr) = proxy.http_addr {
+                let proxy_url = format!("http://{http_addr}");
+                cmd.env("ALL_PROXY", &proxy_url)
+                    .env("HTTP_PROXY", &proxy_url)
+                    .env("HTTPS_PROXY", &proxy_url);
+            }
+        }
+
+        // Set up process group for signal handling (non-interactive mode only).
+        // In interactive mode, we inherit the parent's process group to maintain
+        // proper terminal control for shells and interactive programs.
+        // SAFETY: pre_exec runs after fork but before exec in the child process.
+        // setpgid and setns are async-signal-safe and safe to call in this context.
+        {
+            let policy = policy.clone();
+            let workdir = workdir.map(str::to_string);
+            #[allow(unsafe_code)]
+            unsafe {
+                cmd.pre_exec(move || {
+                    if !interactive {
+                        // Create new process group
+                        libc::setpgid(0, 0);
+                    }
+
+                    // Enter network namespace before applying other restrictions
+                    if let Some(fd) = netns_fd {
+                        let result = libc::setns(fd, libc::CLONE_NEWNET);
+                        if result != 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+
+                    sandbox::apply(&policy, workdir.as_deref())
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+                    drop_privileges(&policy)
+                        .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+                    Ok(())
+                });
+            }
+        }
+
+        let child = cmd.spawn().into_diagnostic()?;
+        let pid = child.id().unwrap_or(0);
+
+        debug!(pid, program, "Process spawned");
+
+        Ok(Self { child, pid })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn spawn_impl(
         program: &str,
         args: &[String],
         workdir: Option<&str>,

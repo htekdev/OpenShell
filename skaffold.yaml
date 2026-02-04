@@ -32,6 +32,11 @@ verify:
     container:
       name: sandbox-test-container
       image: sandbox-test-container
+      securityContext:
+        capabilities:
+          add:
+            - SYS_ADMIN
+            - NET_ADMIN
     executionMode:
       kubernetesCluster: {}
 profiles:

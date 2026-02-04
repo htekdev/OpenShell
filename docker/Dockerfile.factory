@@ -38,8 +38,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /sandbox
 
 # Install system dependencies
+# iproute2 is needed for network namespace management (ip netns, veth pairs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create supervisor and sandbox users/groups

@@ -6,7 +6,7 @@ use miette::Result;
 use tracing::warn;
 
 #[cfg(target_os = "linux")]
-mod linux;
+pub mod linux;
 
 /// Apply sandboxing rules for the current platform.
 ///

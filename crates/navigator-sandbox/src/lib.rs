@@ -9,6 +9,7 @@ mod proxy;
 mod sandbox;
 
 use miette::{IntoDiagnostic, Result};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, error, info};
@@ -16,6 +17,8 @@ use tracing::{debug, error, info};
 use crate::policy::NetworkMode;
 use crate::policy::SandboxPolicy;
 use crate::proxy::ProxyHandle;
+#[cfg(target_os = "linux")]
+use crate::sandbox::linux::netns::NetworkNamespace;
 pub use process::{ProcessHandle, ProcessStatus};
 
 /// Run a command in the sandbox.
@@ -45,15 +48,62 @@ pub async fn run_sandbox(
     // Prepare filesystem: create and chown read_write directories
     prepare_filesystem(&policy)?;
 
-    let _proxy = if matches!(policy.network.mode, NetworkMode::Proxy) {
-        let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
-            miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
-        })?;
-        Some(ProxyHandle::start(proxy_policy).await?)
+    // Create network namespace for proxy mode (Linux only)
+    // This must be created before the proxy so the proxy can bind to the veth IP
+    #[cfg(target_os = "linux")]
+    let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        match NetworkNamespace::create() {
+            Ok(ns) => Some(ns),
+            Err(e) => {
+                // Log warning but continue without netns - allows running without CAP_NET_ADMIN
+                tracing::warn!(
+                    error = %e,
+                    "Failed to create network namespace, continuing without isolation"
+                );
+                None
+            }
+        }
     } else {
         None
     };
 
+    // On non-Linux, network namespace isolation is not supported
+    #[cfg(not(target_os = "linux"))]
+    #[allow(clippy::no_effect_underscore_binding)]
+    let _netns: Option<()> = None;
+
+    let _proxy = if matches!(policy.network.mode, NetworkMode::Proxy) {
+        let proxy_policy = policy.network.proxy.as_ref().ok_or_else(|| {
+            miette::miette!("Network mode is set to proxy but no proxy configuration was provided")
+        })?;
+
+        // If we have a network namespace, bind to the veth host IP
+        #[cfg(target_os = "linux")]
+        let bind_addr = netns.as_ref().map(|ns| {
+            // Use the host IP with the configured port (or default 3128)
+            let port = proxy_policy.http_addr.map_or(3128, |addr| addr.port());
+            SocketAddr::new(ns.host_ip(), port)
+        });
+
+        #[cfg(not(target_os = "linux"))]
+        let bind_addr: Option<SocketAddr> = None;
+
+        Some(ProxyHandle::start_with_bind_addr(proxy_policy, bind_addr).await?)
+    } else {
+        None
+    };
+
+    #[cfg(target_os = "linux")]
+    let mut handle = ProcessHandle::spawn(
+        program,
+        args,
+        workdir.as_deref(),
+        interactive,
+        &policy,
+        netns.as_ref(),
+    )?;
+
+    #[cfg(not(target_os = "linux"))]
     let mut handle = ProcessHandle::spawn(program, args, workdir.as_deref(), interactive, &policy)?;
 
     info!(pid = handle.pid(), "Process started");

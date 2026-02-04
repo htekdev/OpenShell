@@ -1,6 +1,7 @@
 //! Linux sandbox implementation using Landlock and seccomp.
 
 mod landlock;
+pub mod netns;
 mod seccomp;
 
 use crate::policy::SandboxPolicy;

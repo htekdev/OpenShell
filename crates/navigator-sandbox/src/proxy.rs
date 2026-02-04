@@ -21,7 +21,21 @@ pub struct ProxyHandle {
 }
 
 impl ProxyHandle {
+    /// Start the proxy with the default bind address from policy.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub async fn start(policy: &ProxyPolicy) -> Result<Self> {
+        Self::start_with_bind_addr(policy, None).await
+    }
+
+    /// Start the proxy with an optional override bind address.
+    ///
+    /// If `bind_addr` is provided, it overrides `policy.http_addr` and the proxy
+    /// binds to that address (used for network namespace veth interface).
+    /// If `bind_addr` is None, falls back to policy settings.
+    pub async fn start_with_bind_addr(
+        policy: &ProxyPolicy,
+        bind_addr: Option<SocketAddr>,
+    ) -> Result<Self> {
         let allow_hosts = Arc::new(
             policy
                 .allow_hosts
@@ -31,8 +45,12 @@ impl ProxyHandle {
                 .collect::<Vec<_>>(),
         );
 
-        if let Some(http_addr) = policy.http_addr {
-            if !http_addr.ip().is_loopback() {
+        // Use override bind_addr or fall back to policy http_addr
+        let http_addr = bind_addr.or(policy.http_addr);
+
+        if let Some(http_addr) = http_addr {
+            // Only enforce loopback restriction when not using network namespace override
+            if bind_addr.is_none() && !http_addr.ip().is_loopback() {
                 return Err(miette::miette!(
                     "Proxy http_addr must be loopback-only: {http_addr}"
                 ));
