@@ -77,6 +77,7 @@ impl ProviderRegistry {
         let mut registry = Self::default();
         registry.register(providers::claude::ClaudeProvider);
         registry.register(providers::codex::CodexProvider);
+        registry.register(providers::copilot::CopilotProvider);
         registry.register(providers::opencode::OpencodeProvider);
         registry.register(providers::generic::GenericProvider);
         registry.register(providers::openai::OpenaiProvider);
@@ -128,6 +129,7 @@ pub fn normalize_provider_type(input: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "claude" => Some("claude"),
         "codex" => Some("codex"),
+        "copilot" | "gh-copilot" | "github-copilot" => Some("copilot"),
         "opencode" => Some("opencode"),
         "generic" => Some("generic"),
         "openai" => Some("openai"),
@@ -142,6 +144,18 @@ pub fn normalize_provider_type(input: &str) -> Option<&'static str> {
 
 #[must_use]
 pub fn detect_provider_from_command(command: &[String]) -> Option<&'static str> {
+    // Two-token subcommand patterns (e.g., `gh copilot`)
+    if command.len() >= 2 {
+        let first = &command[0];
+        let basename = Path::new(first)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(first);
+        if basename.eq_ignore_ascii_case("gh") && command[1].eq_ignore_ascii_case("copilot") {
+            return Some("copilot");
+        }
+    }
+    // Single-token detection
     let first = command.first()?;
     let basename = Path::new(first)
         .file_name()
@@ -164,6 +178,9 @@ mod tests {
         assert_eq!(normalize_provider_type("openai"), Some("openai"));
         assert_eq!(normalize_provider_type("anthropic"), Some("anthropic"));
         assert_eq!(normalize_provider_type("nvidia"), Some("nvidia"));
+        assert_eq!(normalize_provider_type("copilot"), Some("copilot"));
+        assert_eq!(normalize_provider_type("gh-copilot"), Some("copilot"));
+        assert_eq!(normalize_provider_type("github-copilot"), Some("copilot"));
         assert_eq!(normalize_provider_type("unknown"), None);
     }
 
@@ -180,6 +197,25 @@ mod tests {
         assert_eq!(
             detect_provider_from_command(&["/usr/bin/bash".to_string()]),
             None
+        );
+        // Copilot standalone binary
+        assert_eq!(
+            detect_provider_from_command(&["copilot".to_string()]),
+            Some("copilot")
+        );
+        assert_eq!(
+            detect_provider_from_command(&["/usr/local/bin/copilot".to_string()]),
+            Some("copilot")
+        );
+        // gh copilot wrapper
+        assert_eq!(
+            detect_provider_from_command(&["gh".to_string(), "copilot".to_string()]),
+            Some("copilot")
+        );
+        // gh alone still maps to github
+        assert_eq!(
+            detect_provider_from_command(&["gh".to_string()]),
+            Some("github")
         );
     }
 }
