@@ -129,7 +129,7 @@ pub fn normalize_provider_type(input: &str) -> Option<&'static str> {
     match normalized.as_str() {
         "claude" => Some("claude"),
         "codex" => Some("codex"),
-        "copilot" | "gh-copilot" | "github-copilot" => Some("copilot"),
+        "copilot" => Some("copilot"),
         "opencode" => Some("opencode"),
         "generic" => Some("generic"),
         "openai" => Some("openai"),
@@ -167,8 +167,6 @@ mod tests {
         assert_eq!(normalize_provider_type("anthropic"), Some("anthropic"));
         assert_eq!(normalize_provider_type("nvidia"), Some("nvidia"));
         assert_eq!(normalize_provider_type("copilot"), Some("copilot"));
-        assert_eq!(normalize_provider_type("gh-copilot"), Some("copilot"));
-        assert_eq!(normalize_provider_type("github-copilot"), Some("copilot"));
         assert_eq!(normalize_provider_type("unknown"), None);
     }
 
