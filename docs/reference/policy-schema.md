@@ -164,6 +164,7 @@ Each endpoint defines a reachable destination and optional inspection rules.
 | `enforcement` | string | No | `enforce` actively blocks disallowed requests. `audit` logs violations but allows traffic through. |
 | `access` | string | No | HTTP access level. One of `read-only`, `read-write`, or `full`. Mutually exclusive with `rules`. |
 | `rules` | list of rule objects | No | Fine-grained per-method, per-path allow rules. Mutually exclusive with `access`. |
+| `credential_injection` | object | No | Inject a provider credential at the proxy layer instead of as an environment variable. Requires `protocol: rest` and `tls: terminate`. |
 
 #### Access Levels
 
@@ -194,6 +195,83 @@ rules:
   - allow:
       method: POST
       path: /**/git-upload-pack
+```
+
+#### Credential Injection Object
+
+When set on an endpoint, the referenced provider credential is not injected as an environment variable into the sandbox. Instead, the L7 proxy strips any existing matching header from the agent's request and injects the real credential at the network layer before forwarding upstream. The agent process never sees the raw API key.
+
+Requires `protocol: rest` and `tls: terminate` on the endpoint.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `header` | string | Conditional | HTTP header name to inject (for example, `x-api-key`, `Authorization`). Mutually exclusive with `query_param`. |
+| `value_prefix` | string | No | Prefix prepended to the credential value (for example, `Bearer `). Only valid with `header`. |
+| `query_param` | string | Conditional | URL query parameter name (for example, `key`). Mutually exclusive with `header`. |
+| `provider` | string | Yes | Provider name that holds the credential. |
+| `credential` | string | Yes | Credential key within the provider (for example, `EXA_API_KEY`). |
+
+One of `header` or `query_param` must be set.
+
+**Injection types:**
+
+| Style | Fields | Example Header |
+|---|---|---|
+| Plain header | `header: x-api-key` | `x-api-key: <value>` |
+| Header with prefix | `header: Authorization`, `value_prefix: "Bearer "` | `Authorization: Bearer <value>` |
+| Query parameter | `query_param: key` | URL appended with `?key=<value>` |
+
+Example with header injection:
+
+```yaml
+endpoints:
+  - host: api.exa.ai
+    port: 443
+    protocol: rest
+    tls: terminate
+    enforcement: enforce
+    credential_injection:
+      header: x-api-key
+      provider: exa
+      credential: EXA_API_KEY
+    rules:
+      - allow:
+          method: POST
+          path: /search
+```
+
+Example with Bearer prefix:
+
+```yaml
+endpoints:
+  - host: api.perplexity.ai
+    port: 443
+    protocol: rest
+    tls: terminate
+    enforcement: enforce
+    credential_injection:
+      header: Authorization
+      value_prefix: "Bearer "
+      provider: perplexity
+      credential: PERPLEXITY_API_KEY
+    rules:
+      - allow:
+          method: POST
+          path: /chat/completions
+```
+
+Example with query parameter:
+
+```yaml
+endpoints:
+  - host: www.googleapis.com
+    port: 443
+    protocol: rest
+    tls: terminate
+    credential_injection:
+      query_param: key
+      provider: youtube
+      credential: YOUTUBE_API_KEY
 ```
 
 ### Binary Object

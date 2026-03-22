@@ -15,8 +15,8 @@ use std::path::Path;
 
 use miette::{IntoDiagnostic, Result, WrapErr};
 use openshell_core::proto::{
-    FilesystemPolicy, L7Allow, L7Rule, LandlockPolicy, NetworkBinary, NetworkEndpoint,
-    NetworkPolicyRule, ProcessPolicy, SandboxPolicy,
+    CredentialInjection, FilesystemPolicy, L7Allow, L7Rule, LandlockPolicy, NetworkBinary,
+    NetworkEndpoint, NetworkPolicyRule, ProcessPolicy, SandboxPolicy,
 };
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,11 @@ struct NetworkEndpointDef {
     rules: Vec<L7RuleDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_ips: Vec<String>,
+    /// Optional credential injection. When set, the referenced provider
+    /// credential is withheld from the sandbox environment and injected
+    /// at the L7 proxy layer instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    credential_injection: Option<CredentialInjectionDef>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -130,6 +135,34 @@ struct NetworkBinaryDef {
     #[serde(default, skip_serializing)]
     #[allow(dead_code)]
     harness: bool,
+}
+
+/// Credential injection configuration for an L7 endpoint.
+///
+/// When attached to an endpoint, the referenced provider credential is not
+/// injected as an environment variable. Instead, the L7 proxy injects it
+/// into outbound requests at the network layer.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CredentialInjectionDef {
+    /// HTTP header name (e.g., "x-api-key", "Authorization").
+    /// Mutually exclusive with `query_param`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    header: String,
+    /// Optional prefix prepended to the credential value (e.g., "Bearer ").
+    /// Only valid when `header` is set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    value_prefix: String,
+    /// URL query parameter name (e.g., "key").
+    /// Mutually exclusive with `header`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    query_param: String,
+    /// Provider name that holds the credential.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    provider: String,
+    /// Credential key within the provider (e.g., "EXA_API_KEY").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    credential: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,6 +213,15 @@ fn to_proto(raw: PolicyFile) -> SandboxPolicy {
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips,
+                            credential_injection: e.credential_injection.map(
+                                |ci| CredentialInjection {
+                                    header: ci.header,
+                                    value_prefix: ci.value_prefix,
+                                    query_param: ci.query_param,
+                                    provider: ci.provider,
+                                    credential: ci.credential,
+                                },
+                            ),
                         }
                     })
                     .collect(),
@@ -280,6 +322,15 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
                                 })
                                 .collect(),
                             allowed_ips: e.allowed_ips.clone(),
+                            credential_injection: e.credential_injection.as_ref().map(
+                                |ci| CredentialInjectionDef {
+                                    header: ci.header.clone(),
+                                    value_prefix: ci.value_prefix.clone(),
+                                    query_param: ci.query_param.clone(),
+                                    provider: ci.provider.clone(),
+                                    credential: ci.credential.clone(),
+                                },
+                            ),
                         }
                     })
                     .collect(),
@@ -1115,6 +1166,159 @@ network_policies:
         assert_eq!(
             proto1.network_policies["test"].endpoints[0].host,
             proto2.network_policies["test"].endpoints[0].host
+        );
+    }
+
+    #[test]
+    fn round_trip_preserves_credential_injection_header() {
+        let yaml = r#"
+version: 1
+network_policies:
+  exa_api:
+    name: exa-search-api
+    endpoints:
+      - host: api.exa.ai
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        credential_injection:
+          header: x-api-key
+          provider: exa
+          credential: EXA_API_KEY
+        rules:
+          - allow:
+              method: POST
+              path: /search
+    binaries:
+      - path: /usr/bin/node
+"#;
+        let proto1 = parse_sandbox_policy(yaml).expect("parse failed");
+        let ci1 = proto1.network_policies["exa_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection missing");
+        assert_eq!(ci1.header, "x-api-key");
+        assert_eq!(ci1.provider, "exa");
+        assert_eq!(ci1.credential, "EXA_API_KEY");
+        assert!(ci1.value_prefix.is_empty());
+        assert!(ci1.query_param.is_empty());
+
+        let yaml_out = serialize_sandbox_policy(&proto1).expect("serialize failed");
+        let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
+        let ci2 = proto2.network_policies["exa_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection lost in round-trip");
+        assert_eq!(ci1.header, ci2.header);
+        assert_eq!(ci1.provider, ci2.provider);
+        assert_eq!(ci1.credential, ci2.credential);
+    }
+
+    #[test]
+    fn round_trip_preserves_credential_injection_bearer() {
+        let yaml = r#"
+version: 1
+network_policies:
+  perplexity_api:
+    name: perplexity-api
+    endpoints:
+      - host: api.perplexity.ai
+        port: 443
+        protocol: rest
+        tls: terminate
+        enforcement: enforce
+        credential_injection:
+          header: Authorization
+          value_prefix: "Bearer "
+          provider: perplexity
+          credential: PERPLEXITY_API_KEY
+        rules:
+          - allow:
+              method: POST
+              path: /chat/completions
+    binaries:
+      - path: /usr/bin/node
+"#;
+        let proto1 = parse_sandbox_policy(yaml).expect("parse failed");
+        let ci1 = proto1.network_policies["perplexity_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection missing");
+        assert_eq!(ci1.header, "Authorization");
+        assert_eq!(ci1.value_prefix, "Bearer ");
+        assert_eq!(ci1.credential, "PERPLEXITY_API_KEY");
+
+        let yaml_out = serialize_sandbox_policy(&proto1).expect("serialize failed");
+        let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
+        let ci2 = proto2.network_policies["perplexity_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection lost in round-trip");
+        assert_eq!(ci1.value_prefix, ci2.value_prefix);
+    }
+
+    #[test]
+    fn round_trip_preserves_credential_injection_query_param() {
+        let yaml = r#"
+version: 1
+network_policies:
+  youtube_api:
+    name: youtube-data-api
+    endpoints:
+      - host: www.googleapis.com
+        port: 443
+        protocol: rest
+        tls: terminate
+        credential_injection:
+          query_param: key
+          provider: youtube
+          credential: YOUTUBE_API_KEY
+    binaries:
+      - path: /usr/bin/node
+"#;
+        let proto1 = parse_sandbox_policy(yaml).expect("parse failed");
+        let ci1 = proto1.network_policies["youtube_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection missing");
+        assert_eq!(ci1.query_param, "key");
+        assert_eq!(ci1.credential, "YOUTUBE_API_KEY");
+        assert!(ci1.header.is_empty());
+
+        let yaml_out = serialize_sandbox_policy(&proto1).expect("serialize failed");
+        let proto2 = parse_sandbox_policy(&yaml_out).expect("re-parse failed");
+        let ci2 = proto2.network_policies["youtube_api"].endpoints[0]
+            .credential_injection
+            .as_ref()
+            .expect("credential_injection lost in round-trip");
+        assert_eq!(ci1.query_param, ci2.query_param);
+        assert_eq!(ci1.credential, ci2.credential);
+    }
+
+    #[test]
+    fn no_credential_injection_preserves_none() {
+        let yaml = r#"
+version: 1
+network_policies:
+  test:
+    endpoints:
+      - host: example.com
+        port: 443
+    binaries:
+      - path: /usr/bin/curl
+"#;
+        let proto = parse_sandbox_policy(yaml).expect("parse failed");
+        assert!(
+            proto.network_policies["test"].endpoints[0]
+                .credential_injection
+                .is_none()
+        );
+
+        let yaml_out = serialize_sandbox_policy(&proto).expect("serialize failed");
+        assert!(
+            !yaml_out.contains("credential_injection"),
+            "credential_injection should not appear in output when not set"
         );
     }
 }

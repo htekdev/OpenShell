@@ -33,6 +33,7 @@ All paths are relative to `crates/openshell-sandbox/src/`.
 | `l7/relay.rs` | Protocol-aware bidirectional relay with per-request OPA evaluation |
 | `l7/rest.rs` | HTTP/1.1 request/response parsing, body framing (Content-Length, chunked), deny response generation |
 | `l7/provider.rs` | `L7Provider` trait and `L7Request`/`BodyLength` types |
+| `credential_injector.rs` | L7 proxy credential injection for non-inference providers -- extracts injection configs from policy, resolves against provider env, injects credentials at the proxy layer |
 
 ## Startup and Orchestration
 
@@ -81,11 +82,13 @@ flowchart TD
    - Priority 1: `--policy-rules` + `--policy-data` provided -- load OPA engine from local Rego file and YAML data file via `OpaEngine::from_files()`. Query `query_sandbox_config()` for filesystem/landlock/process settings. Network mode forced to `Proxy`.
    - Priority 2: `--sandbox-id` + `--openshell-endpoint` provided -- fetch typed proto policy via `grpc_client::fetch_policy()`. Create OPA engine via `OpaEngine::from_proto()` using baked-in Rego rules. Convert proto to `SandboxPolicy` via `TryFrom`, which always forces `NetworkMode::Proxy` so that all egress passes through the proxy and the `inference.local` virtual host is always addressable.
    - Neither present: return fatal error.
-   - Output: `(SandboxPolicy, Option<Arc<OpaEngine>>)`
+   - Output: `(SandboxPolicy, Option<Arc<OpaEngine>>, proto::SandboxPolicy)`
 
 2. **Provider environment fetching**: If sandbox ID and endpoint are available, call `grpc_client::fetch_provider_environment()` to get a `HashMap<String, String>` of credential environment variables. On failure, log a warning and continue with an empty map.
 
-3. **Binary identity cache**: If OPA engine is active, create `Arc<BinaryIdentityCache::new()>` for SHA256 TOFU enforcement.
+3. **Credential injection extraction**: Scan the proto policy's network endpoints for `credential_injection` configs. For each match, look up the referenced credential in the provider environment, remove it from the env map (so it is not exposed to the sandbox process), and build a `CredentialInjector` that the L7 proxy will use to inject credentials at the network layer. See [Credential Injection](#credential-injection).
+
+4. **Binary identity cache**: If OPA engine is active, create `Arc<BinaryIdentityCache::new()>` for SHA256 TOFU enforcement.
 
 4. **Filesystem preparation** (`prepare_filesystem()`): For each path in `filesystem.read_write`, create the directory if it does not exist and `chown` to the configured `run_as_user`/`run_as_group`. Runs as the supervisor (root) before forking.
 
@@ -1000,6 +1003,56 @@ Implements `L7Provider` for HTTP/1.1:
 4. Log the L7 decision (tagged `L7_REQUEST`)
 5. If allowed (or audit mode): relay request to upstream and response back to client, then loop
 6. If denied in enforce mode: send 403 and close the connection
+
+## Credential Injection
+
+**File:** `crates/openshell-sandbox/src/credential_injector.rs`
+
+Credential injection extends the L7 proxy to inject API credentials at the network layer for arbitrary REST endpoints. This generalizes the `inference.local` credential injection pattern to any service in `network_policies`.
+
+### Problem
+
+When provider credentials are injected as environment variables, the agent process can read raw API keys from `process.env`. A prompt injection attack, malicious skill, or compromised dependency can read and exfiltrate these values. The network policy limits where a leaked key can be sent, but does not prevent the agent from reading it.
+
+### Architecture
+
+When an endpoint has a `credential_injection` configuration in the policy YAML:
+
+1. **Sandbox startup** (`lib.rs`): `CredentialInjector::extract_from_policy()` scans the proto policy for `credential_injection` entries, cross-references them with the provider environment, removes the matched credentials from the child env map, and builds a `CredentialInjector` keyed by `(host, port)`.
+2. **Proxy startup**: The `CredentialInjector` is passed through to `L7EvalContext` alongside the existing `SecretResolver`.
+3. **Request relay** (`l7/rest.rs`): After the OPA policy allows a request, `relay_http_request_with_resolver()` applies credential injection:
+   - For header injection: strips any existing header with the same name (case-insensitive) and appends the injected header with the real credential.
+   - For query parameter injection: appends the credential as a URL query parameter.
+4. **Agent process**: never sees the credential. It is not in `process.env` and not in any placeholder form.
+
+### Injection types
+
+| Type | YAML fields | Example |
+|---|---|---|
+| Header | `header: x-api-key` | `x-api-key: <value>` |
+| Header + prefix | `header: Authorization`, `value_prefix: "Bearer "` | `Authorization: Bearer <value>` |
+| Query parameter | `query_param: key` | URL appended with `?key=<value>` |
+
+### Relationship to SecretResolver
+
+`SecretResolver` and `CredentialInjector` serve different purposes:
+
+| | SecretResolver | CredentialInjector |
+|---|---|---|
+| **Mechanism** | Placeholder rewriting | Direct injection |
+| **Agent visibility** | Agent sees placeholder env vars | Agent sees nothing |
+| **When applied** | All provider credentials (default) | Only credentials with `credential_injection` |
+| **Auth header source** | Agent constructs the header using placeholder | Proxy adds the header from scratch |
+| **Spoofing risk** | Agent could send placeholders to wrong endpoint | Proxy strips any existing header first |
+
+Both are applied in `relay_http_request_with_resolver()`: `SecretResolver` rewrites first, then `CredentialInjector` injects.
+
+### Validation rules
+
+- `credential_injection` requires `protocol: rest` and `tls: terminate`
+- Exactly one of `header` or `query_param` must be set
+- `credential` and `provider` are required
+- `value_prefix` is only valid with `header`
 
 ## Process Identity
 

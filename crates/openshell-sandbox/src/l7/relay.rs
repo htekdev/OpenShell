@@ -31,6 +31,8 @@ pub struct L7EvalContext {
     pub cmdline_paths: Vec<String>,
     /// Supervisor-only placeholder resolver for outbound headers.
     pub(crate) secret_resolver: Option<Arc<SecretResolver>>,
+    /// Credential injector for L7 endpoints with credential_injection config.
+    pub(crate) credential_injector: Option<Arc<crate::credential_injector::CredentialInjector>>,
 }
 
 /// Run protocol-aware L7 inspection on a tunnel.
@@ -133,12 +135,19 @@ where
         );
 
         if allowed || config.enforcement == EnforcementMode::Audit {
+            // Look up credential injection for this endpoint
+            let injection = ctx
+                .credential_injector
+                .as_ref()
+                .and_then(|ci| ci.lookup(&ctx.host, ctx.port));
+
             // Forward request to upstream and relay response
             let reusable = crate::l7::rest::relay_http_request_with_resolver(
                 &req,
                 client,
                 upstream,
                 ctx.secret_resolver.as_deref(),
+                injection,
             )
             .await?;
             if !reusable {

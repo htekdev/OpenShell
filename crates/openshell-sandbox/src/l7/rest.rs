@@ -123,7 +123,7 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
-    relay_http_request_with_resolver(req, client, upstream, None).await
+    relay_http_request_with_resolver(req, client, upstream, None, None).await
 }
 
 pub(crate) async fn relay_http_request_with_resolver<C, U>(
@@ -131,6 +131,7 @@ pub(crate) async fn relay_http_request_with_resolver<C, U>(
     client: &mut C,
     upstream: &mut U,
     resolver: Option<&crate::secrets::SecretResolver>,
+    credential_injection: Option<&crate::credential_injector::ResolvedInjection>,
 ) -> Result<bool>
 where
     C: AsyncRead + AsyncWrite + Unpin,
@@ -142,13 +143,34 @@ where
         .position(|w| w == b"\r\n\r\n")
         .map_or(req.raw_header.len(), |p| p + 4);
 
+    // Step 1: Rewrite placeholder-based secrets (existing SecretResolver)
     let rewritten_header = rewrite_http_header_block(&req.raw_header[..header_end], resolver);
 
+    // Step 2: Apply credential injection (strip + inject header or query param)
+    let rewritten_header = if let Some(injection) = credential_injection {
+        crate::credential_injector::inject_credential(&rewritten_header, injection)
+    } else {
+        rewritten_header
+    };
+
+    // Recalculate header_end after potential credential injection rewrites
+    let final_header_end = rewritten_header
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(rewritten_header.len(), |p| p + 4);
+
     upstream
-        .write_all(&rewritten_header)
+        .write_all(&rewritten_header[..final_header_end])
         .await
         .into_diagnostic()?;
 
+    // Write any overflow from the rewritten header (should be empty after injection)
+    let final_overflow = &rewritten_header[final_header_end..];
+    if !final_overflow.is_empty() {
+        upstream.write_all(final_overflow).await.into_diagnostic()?;
+    }
+
+    // Original overflow from the raw request (body data after original header end)
     let overflow = &req.raw_header[header_end..];
     if !overflow.is_empty() {
         upstream.write_all(overflow).await.into_diagnostic()?;
