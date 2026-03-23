@@ -30,10 +30,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install protoc
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
-          protoc --version
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "29.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache cargo registry and build
         uses: actions/cache@v4
