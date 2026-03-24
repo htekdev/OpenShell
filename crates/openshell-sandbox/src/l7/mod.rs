@@ -262,6 +262,69 @@ pub fn validate_l7_policies(data_json: &serde_json::Value) -> (Vec<String>, Vec<
                     }
                 }
             }
+
+            // Validate credential_injection
+            if let Some(ci) = ep.get("credential_injection").and_then(|v| v.as_object()) {
+                let ci_header = ci
+                    .get("header")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ci_query_param = ci
+                    .get("query_param")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ci_credential = ci
+                    .get("credential")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ci_provider = ci
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let ci_value_prefix = ci
+                    .get("value_prefix")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                let has_header = !ci_header.is_empty();
+                let has_query_param = !ci_query_param.is_empty();
+
+                if has_header && has_query_param {
+                    errors.push(format!(
+                        "{loc}: credential_injection: header and query_param are mutually exclusive"
+                    ));
+                }
+                if !has_header && !has_query_param {
+                    errors.push(format!(
+                        "{loc}: credential_injection: one of header or query_param is required"
+                    ));
+                }
+                if ci_credential.is_empty() {
+                    errors.push(format!(
+                        "{loc}: credential_injection: credential is required"
+                    ));
+                }
+                if ci_provider.is_empty() {
+                    errors.push(format!(
+                        "{loc}: credential_injection: provider is required"
+                    ));
+                }
+                if !ci_value_prefix.is_empty() && !has_header {
+                    errors.push(format!(
+                        "{loc}: credential_injection: value_prefix is only valid with header"
+                    ));
+                }
+                if protocol != "rest" {
+                    errors.push(format!(
+                        "{loc}: credential_injection requires protocol: rest"
+                    ));
+                }
+                if tls != "terminate" {
+                    errors.push(format!(
+                        "{loc}: credential_injection requires tls: terminate"
+                    ));
+                }
+            }
         }
     }
 

@@ -132,6 +132,7 @@ impl ProxyHandle {
         tls_state: Option<Arc<ProxyTlsState>>,
         inference_ctx: Option<Arc<InferenceContext>>,
         secret_resolver: Option<Arc<SecretResolver>>,
+        credential_injector: Option<Arc<crate::credential_injector::CredentialInjector>>,
         denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
     ) -> Result<Self> {
         // Use override bind_addr, fall back to policy http_addr, then default
@@ -162,10 +163,11 @@ impl ProxyHandle {
                         let tls = tls_state.clone();
                         let inf = inference_ctx.clone();
                         let resolver = secret_resolver.clone();
+                        let injector = credential_injector.clone();
                         let dtx = denial_tx.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx,
+                                stream, opa, cache, spid, tls, inf, resolver, injector, dtx,
                             )
                             .await
                             {
@@ -265,6 +267,7 @@ async fn handle_tcp_connection(
     tls_state: Option<Arc<ProxyTlsState>>,
     inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<SecretResolver>>,
+    credential_injector: Option<Arc<crate::credential_injector::CredentialInjector>>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
@@ -554,6 +557,7 @@ async fn handle_tcp_connection(
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
             secret_resolver: secret_resolver.clone(),
+            credential_injector: credential_injector.clone(),
         };
 
         if l7_config.tls == crate::l7::TlsMode::Terminate {

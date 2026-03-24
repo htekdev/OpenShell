@@ -7,6 +7,7 @@
 
 pub mod bypass_monitor;
 mod child_env;
+mod credential_injector;
 pub mod denial_aggregator;
 mod grpc_client;
 mod identity;
@@ -170,7 +171,7 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
-    let (policy, opa_engine) = load_policy(
+    let (policy, opa_engine, proto_policy) = load_policy(
         sandbox_id.clone(),
         sandbox,
         openshell_endpoint.clone(),
@@ -200,6 +201,22 @@ pub async fn run_sandbox(
         }
     } else {
         std::collections::HashMap::new()
+    };
+
+    // Extract credential injections from policy endpoints and remove
+    // injected credentials from the provider environment. Credentials
+    // referenced by credential_injection configs are withheld from the
+    // sandbox process and injected at the L7 proxy layer instead.
+    let (credential_injector, provider_env) =
+        credential_injector::CredentialInjector::extract_from_policy(&proto_policy, provider_env);
+    let credential_injector = if credential_injector.is_empty() {
+        None
+    } else {
+        info!(
+            count = credential_injector.entries_count(),
+            "Credential injection configured — credentials withheld from sandbox environment"
+        );
+        Some(Arc::new(credential_injector))
     };
 
     let (provider_env, secret_resolver) = SecretResolver::from_provider_env(provider_env);
@@ -349,6 +366,7 @@ pub async fn run_sandbox(
             tls_state,
             inference_ctx,
             secret_resolver.clone(),
+            credential_injector.clone(),
             denial_tx,
         )
         .await?;
@@ -959,7 +977,11 @@ async fn load_policy(
     openshell_endpoint: Option<String>,
     policy_rules: Option<String>,
     policy_data: Option<String>,
-) -> Result<(SandboxPolicy, Option<Arc<OpaEngine>>)> {
+) -> Result<(
+    SandboxPolicy,
+    Option<Arc<OpaEngine>>,
+    openshell_core::proto::SandboxPolicy,
+)> {
     // File mode: load OPA engine from rego rules + YAML data (dev override)
     if let (Some(policy_file), Some(data_file)) = (&policy_rules, &policy_data) {
         info!(
@@ -983,7 +1005,7 @@ async fn load_policy(
             process: config.process,
         };
         enrich_sandbox_baseline_paths(&mut policy);
-        return Ok((policy, Some(Arc::new(engine))));
+        return Ok((policy, Some(Arc::new(engine)), Default::default()));
     }
 
     // gRPC mode: fetch typed proto policy, construct OPA engine from baked rules + proto data
@@ -1042,8 +1064,8 @@ async fn load_policy(
         info!("Creating OPA engine from proto policy data");
         let opa_engine = Some(Arc::new(OpaEngine::from_proto(&proto_policy)?));
 
-        let policy = SandboxPolicy::try_from(proto_policy)?;
-        return Ok((policy, opa_engine));
+        let policy = SandboxPolicy::try_from(proto_policy.clone())?;
+        return Ok((policy, opa_engine, proto_policy));
     }
 
     // No policy source available

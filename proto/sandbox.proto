@@ -85,6 +85,29 @@ message NetworkEndpoint {
   // If `port` is set and `ports` is empty, `port` is normalized to `ports: [port]`.
   // If both are set, `ports` takes precedence.
   repeated uint32 ports = 9;
+  // Optional credential injection configuration. When set, the referenced
+  // provider credential is withheld from the sandbox environment and injected
+  // at the L7 proxy layer instead. Requires protocol = "rest" and tls = "terminate".
+  CredentialInjection credential_injection = 10;
+}
+
+// Credential injection configuration for L7 proxy endpoints.
+// The proxy strips any existing header matching the target and injects
+// the real credential before forwarding the request upstream.
+message CredentialInjection {
+  // HTTP header name for header-based injection (e.g., "x-api-key", "Authorization").
+  // Mutually exclusive with query_param.
+  string header = 1;
+  // Optional prefix prepended to the credential value (e.g., "Bearer ").
+  // Only valid when header is set.
+  string value_prefix = 2;
+  // URL query parameter name for query-param-based injection (e.g., "key").
+  // Mutually exclusive with header.
+  string query_param = 3;
+  // Provider name that holds the credential.
+  string provider = 4;
+  // Credential key within the provider (e.g., "EXA_API_KEY").
+  string credential = 5;
 }
 
 // An L7 policy rule (allow-only).
