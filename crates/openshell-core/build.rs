@@ -17,17 +17,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // --- Protobuf compilation ---
-    // Prefer PROTOC env var (e.g., from mise or system install) when available.
-    // Fall back to bundled protoc from protobuf-src if the feature is enabled.
+    // Prefer PROTOC env var (e.g., from mise, setup-protoc action, or system
+    // install) when available. Fall back to bundled protoc from protobuf-src.
     if env::var("PROTOC").is_err() {
-        #[cfg(feature = "bundled-protoc")]
-        {
-            // SAFETY: This is run at build time in a single-threaded build script context.
-            // No other threads are reading environment variables concurrently.
-            #[allow(unsafe_code)]
-            unsafe {
-                env::set_var("PROTOC", protobuf_src::protoc());
-            }
+        // SAFETY: This is run at build time in a single-threaded build script context.
+        // No other threads are reading environment variables concurrently.
+        #[allow(unsafe_code)]
+        unsafe {
+            env::set_var("PROTOC", protobuf_src::protoc());
         }
     }
 

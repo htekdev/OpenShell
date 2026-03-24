@@ -25,12 +25,10 @@ url = { workspace = true }
 ## Off by default so production builds have an empty registry.
 ## Enabled by e2e tests and during development.
 dev-settings = []
-## Use bundled protoc from protobuf-src instead of system protoc.
-bundled-protoc = ["protobuf-src"]
 
 [build-dependencies]
 tonic-build = { workspace = true }
-protobuf-src = { workspace = true, optional = true }
+protobuf-src = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
